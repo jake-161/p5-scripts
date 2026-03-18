@@ -1,6 +1,7 @@
 #include <P1Camera.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -32,6 +33,21 @@ std::string PropertyValueSummary(PropertyValue const& value)
     return value.ToString();
 }
 
+std::string TryGetCameraModel(Camera const& camera)
+{
+    try {
+        return camera.PropertySpec(2).mValue.StringValue();
+    } catch (SdkException const&) {
+        return std::string();
+    }
+}
+
+bool IsP5Camera(Camera const& camera)
+{
+    auto model = TryGetCameraModel(camera);
+    return model.rfind("P5", 0) == 0;
+}
+
 void PrintUsage(char const* argv0)
 {
     std::cerr
@@ -41,9 +57,11 @@ void PrintUsage(char const* argv0)
         << "  " << argv0 << " <camera-ip> status [password]\n"
         << "  " << argv0 << " <camera-ip> properties [password]\n"
         << "  " << argv0 << " <camera-ip> capture [output.iiq] [password]\n"
+        << "  " << argv0 << " <camera-ip> live-view [output.jpg|output.ppm] [password]\n"
         << "  " << argv0 << " <camera-ip> images [password]\n"
         << "  " << argv0 << " <camera-ip> download-image <image-id|filename> [output.iiq] [password]\n"
         << "  " << argv0 << " <camera-ip> property-info <property-id> [password]\n"
+        << "  " << argv0 << " <camera-ip> set-property <property-id> <value> [password]\n"
         << "  " << argv0 << " <camera-ip> set-iso <value> [password]\n"
         << "  " << argv0 << " <camera-ip> set-aperture <value> [password]\n"
         << "  " << argv0 << " <camera-ip> set-shutter-us <microseconds> [password]\n"
@@ -56,9 +74,11 @@ void PrintUsage(char const* argv0)
         << "  status                Show key camera state and confirmed subscription support.\n"
         << "  properties            Dump all currently exposed properties.\n"
         << "  capture               Trigger a capture and save the returned IIQ file to host.\n"
+        << "  live-view             Subscribe to live view and save the first returned frame.\n"
         << "  images                List images currently visible on camera storage.\n"
         << "  download-image        Download a stored image by image id or filename.\n"
         << "  property-info         Show one property's type, value, range, and allowed values.\n"
+        << "  set-property          Set any writable property by numeric id.\n"
         << "  set-iso               Set property 120 (ISO) using an integer value.\n"
         << "  set-aperture          Set property 1003 (Aperture) using a floating point value.\n"
         << "  set-shutter-us        Set property 1012 (Shutter Speed [us]) using an integer value.\n"
@@ -76,9 +96,11 @@ void PrintUsage(char const* argv0)
         << "  " << argv0 << " --help\n"
         << "  " << argv0 << " 192.168.1.241 status\n"
         << "  " << argv0 << " 192.168.1.241 capture shot.iiq\n"
+        << "  " << argv0 << " 192.168.1.241 live-view liveview.jpg\n"
         << "  " << argv0 << " 192.168.1.241 images\n"
         << "  " << argv0 << " 192.168.1.241 download-image 42 latest.iiq\n"
         << "  " << argv0 << " 192.168.1.241 property-info 120\n"
+        << "  " << argv0 << " 192.168.1.241 set-property 1204 On\n"
         << "  " << argv0 << " 192.168.1.241 set-iso 400\n"
         << "  " << argv0 << " 192.168.1.241 set-shutter-us 1000\n"
         << "  " << argv0 << " 192.168.1.241 set-shutter 1/1000\n";
@@ -121,7 +143,23 @@ Options ParseArgs(int argc, char** argv)
         return options;
     }
 
+    if (options.command == "live-view") {
+        if (argc >= 4) {
+            std::string fourth = argv[3];
+            if (fourth.find('/') != std::string::npos || fourth.find('.') != std::string::npos) {
+                options.argument = fourth;
+                if (argc >= 5) {
+                    options.password = argv[4];
+                }
+            } else {
+                options.password = fourth;
+            }
+        }
+        return options;
+    }
+
     if (options.command == "property-info" ||
+        options.command == "set-property" ||
         options.command == "set-iso" ||
         options.command == "set-aperture" ||
         options.command == "set-shutter-us" ||
@@ -134,7 +172,16 @@ Options ParseArgs(int argc, char** argv)
             throw std::runtime_error(options.command + " requires a value");
         }
         options.argument = argv[3];
-        if (argc >= 5) {
+        if (options.command == "set-property") {
+            if (argc < 5) {
+                PrintUsage(argv[0]);
+                throw std::runtime_error("set-property requires a property id and value");
+            }
+            options.argument2 = argv[4];
+            if (argc >= 6) {
+                options.password = argv[5];
+            }
+        } else if (argc >= 5) {
             options.password = argv[4];
         }
         return options;
@@ -177,6 +224,32 @@ fs::path CaptureOutputPath(IFullImage const& image, std::string const& requested
     return fs::path("capture.iiq");
 }
 
+char const* ImageFormatString(ImageFormat format)
+{
+    switch (format) {
+        case ImageFormat::None: return "None";
+        case ImageFormat::JPEG: return "JPEG";
+        case ImageFormat::RGB24: return "RGB24";
+        case ImageFormat::Auto: return "Auto";
+        case ImageFormat::IIQ: return "IIQ";
+        default: return "Unknown";
+    }
+}
+
+fs::path LiveViewOutputPath(ILiveView const& image, std::string const& requestedPath)
+{
+    if (!requestedPath.empty()) {
+        return fs::path(requestedPath);
+    }
+    if (image.Format() == ImageFormat::JPEG) {
+        return fs::path("liveview.jpg");
+    }
+    if (image.Format() == ImageFormat::RGB24) {
+        return fs::path("liveview.ppm");
+    }
+    return fs::path("liveview.bin");
+}
+
 void SaveBufferToDisk(std::shared_ptr<uint8_t const> const& data, size_t size, fs::path const& outputPath)
 {
     if (!data || size == 0) {
@@ -194,6 +267,43 @@ void SaveBufferToDisk(std::shared_ptr<uint8_t const> const& data, size_t size, f
     }
 }
 
+void SaveLiveViewToDisk(ILiveView const& image, fs::path const& outputPath)
+{
+    auto data = image.Data();
+    auto size = image.DataSizeBytes();
+    if (!data || size == 0) {
+        throw std::runtime_error("live view buffer is empty");
+    }
+
+    if (image.Format() == ImageFormat::JPEG) {
+        SaveBufferToDisk(data, size, outputPath);
+        return;
+    }
+
+    if (image.Format() == ImageFormat::RGB24) {
+        auto width = image.DestinationWidth();
+        auto height = image.DestinationHeight();
+        auto expectedSize = static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
+        if (size != expectedSize) {
+            throw std::runtime_error("unexpected RGB24 live view payload size");
+        }
+
+        std::ofstream out(outputPath, std::ios::binary);
+        if (!out) {
+            throw std::runtime_error("failed to open output file: " + outputPath.string());
+        }
+
+        out << "P6\n" << width << ' ' << height << "\n255\n";
+        out.write(reinterpret_cast<char const*>(data.get()), static_cast<std::streamsize>(size));
+        if (!out) {
+            throw std::runtime_error("failed while writing live view output file");
+        }
+        return;
+    }
+
+    SaveBufferToDisk(data, size, outputPath);
+}
+
 std::shared_ptr<IFullImage const> WaitForFullImage(Listener& listener, uint32_t timeoutMs)
 {
     while (true) {
@@ -208,6 +318,79 @@ std::shared_ptr<IFullImage const> WaitForFullImage(Listener& listener, uint32_t 
 
         if (notification->Type() == EventType::CameraDisconnected) {
             throw std::runtime_error("camera disconnected while waiting for image transfer");
+        }
+
+        std::cout << "Ignoring notification: " << notification->Type().name << '\n';
+    }
+}
+
+void StartLiveViewSubscription(ILiveViewSubscription& liveView)
+{
+    auto formats = liveView.ImageFormatsSupported();
+    auto subscribeFormat = [&](ImageFormat format) -> bool {
+        try {
+            std::cout << "Subscribing to live view using format " << ImageFormatString(format) << '\n';
+            liveView.Subscribe(format);
+            return true;
+        } catch (SdkException const& ex) {
+            std::cout
+                << "Live view format " << ImageFormatString(format)
+                << " rejected by camera/SDK: " << ex.what()
+                << '\n';
+            return false;
+        }
+    };
+
+    for (ImageFormat preferred : {ImageFormat::JPEG, ImageFormat::RGB24, ImageFormat::Auto}) {
+        if (subscribeFormat(preferred)) {
+            return;
+        }
+    }
+
+    for (ImageFormat format : formats) {
+        if (format != ImageFormat::JPEG &&
+            format != ImageFormat::RGB24 &&
+            format != ImageFormat::Auto &&
+            subscribeFormat(format)) {
+            return;
+        }
+    }
+
+    std::cout << "Subscribing to live view using camera default format\n";
+    liveView.Subscribe();
+}
+
+std::shared_ptr<ILiveView const> WaitForLiveViewFrame(Listener& listener, uint32_t timeoutMs)
+{
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+
+    while (true) {
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            return nullptr;
+        }
+
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        auto notification = listener.WaitForNotification(static_cast<uint32_t>(remaining));
+        if (!notification) {
+            return nullptr;
+        }
+
+        if (notification->Type() == EventType::CameraLiveViewStarted) {
+            std::cout << "Live view started\n";
+            continue;
+        }
+
+        if (notification->Type() == EventType::CameraNewLiveViewImage) {
+            return notification->LiveView();
+        }
+
+        if (notification->Type() == EventType::CameraLiveViewStopped) {
+            throw std::runtime_error("camera stopped live view before a frame was delivered");
+        }
+
+        if (notification->Type() == EventType::CameraDisconnected) {
+            throw std::runtime_error("camera disconnected while waiting for live view");
         }
 
         std::cout << "Ignoring notification: " << notification->Type().name << '\n';
@@ -310,11 +493,16 @@ void PrintKeyProperty(Camera const& camera, uint32_t propertyId, char const* lab
 
 void PrintStatus(Camera& camera)
 {
+    bool isP5 = IsP5Camera(camera);
+
     std::cout
         << "Camera handle: " << camera.Id() << '\n'
         << "Connection: " << ConnectionTypeString(camera.ConnectionType()) << '\n';
 
     PrintSubscriptionSupport(*camera.Subscriptions());
+    if (isP5) {
+        std::cout << "Live view note: Phase One CameraSDK does not provide LiveView support on P5 cameras.\n";
+    }
     PrintKeyProperty(camera, 2, "Model");
     PrintKeyProperty(camera, 3, "Serial");
     PrintKeyProperty(camera, 4, "Firmware");
@@ -457,6 +645,51 @@ void CaptureToHost(Camera& camera, std::string const& requestedPath)
     listener.WakeUpWaitingThread();
 }
 
+void CaptureLiveViewFrame(Camera& camera, std::string const& requestedPath)
+{
+    if (IsP5Camera(camera)) {
+        throw std::runtime_error("live view is not supported on P5 cameras by Phase One CameraSDK 3.1.8");
+    }
+
+    auto liveView = camera.Subscriptions()->LiveView();
+    if (!liveView->IsSupported()) {
+        throw std::runtime_error("camera does not support live view");
+    }
+
+    Listener listener;
+    listener.EnableNotification(camera, EventType::CameraLiveViewStarted);
+    listener.EnableNotification(camera, EventType::CameraNewLiveViewImage);
+    listener.EnableNotification(camera, EventType::CameraLiveViewStopped);
+    listener.EnableNotification(camera, EventType::CameraDisconnected);
+
+    try {
+        StartLiveViewSubscription(*liveView);
+        auto image = WaitForLiveViewFrame(listener, 30000);
+        if (!image) {
+            throw std::runtime_error("timed out waiting for live view frame");
+        }
+
+        fs::path outputPath = LiveViewOutputPath(*image, requestedPath);
+        SaveLiveViewToDisk(*image, outputPath);
+
+        std::cout
+            << "Live view frame saved to " << outputPath
+            << " | bytes=" << image->DataSizeBytes()
+            << " | format=" << ImageFormatString(image->Format())
+            << " | size=" << image->DestinationWidth() << 'x' << image->DestinationHeight()
+            << '\n';
+
+        liveView->Unsubscribe();
+        listener.WakeUpWaitingThread();
+    } catch (...) {
+        if (liveView->IsSubscribed()) {
+            liveView->Unsubscribe();
+        }
+        listener.WakeUpWaitingThread();
+        throw;
+    }
+}
+
 void DownloadStoredImage(Camera& camera, std::string const& selector, std::string const& requestedPath)
 {
     auto imageHandle = FindStoredImage(camera, selector);
@@ -550,6 +783,8 @@ int main(int argc, char** argv)
             PrintProperties(camera);
         } else if (options.command == "capture") {
             CaptureToHost(camera, options.argument);
+        } else if (options.command == "live-view") {
+            CaptureLiveViewFrame(camera, options.argument);
         } else if (options.command == "images") {
             PrintStoredImages(camera);
         } else if (options.command == "download-image") {
@@ -563,6 +798,11 @@ int main(int argc, char** argv)
             DownloadStoredImage(camera, options.argument, requestedPath);
         } else if (options.command == "property-info") {
             PrintPropertyInfo(camera, options.argument);
+        } else if (options.command == "set-property") {
+            if (!IsNumeric(options.argument)) {
+                throw std::runtime_error("set-property requires a numeric property id");
+            }
+            SetPropertyById(camera, static_cast<uint32_t>(std::stoul(options.argument)), options.argument2);
         } else if (options.command == "set-iso") {
             SetPropertyById(camera, 120, options.argument);
         } else if (options.command == "set-aperture") {
