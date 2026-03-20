@@ -53,6 +53,7 @@ On Linux, the target sets an `RPATH` to the bundled SDK library directory so the
 ./build/p5-cli <camera-ip> download-image <image-id|filename> [output.iiq] [password]
 ./build/p5-cli <camera-ip> property-info <property-id> [password]
 ./build/p5-cli <camera-ip> set-property <property-id> <value> [password]
+./build/p5-cli <camera-ip> set-ip <new-ip> [netmask] [gateway] [password]
 ./build/p5-cli <camera-ip> set-iso <value> [password]
 ./build/p5-cli <camera-ip> set-aperture <value> [password]
 ./build/p5-cli <camera-ip> set-shutter-us <microseconds> [password]
@@ -104,6 +105,18 @@ Set ISO:
 
 ```bash
 ./build/p5-cli 192.168.1.241 set-iso 400
+```
+
+Set only the camera IP address and apply it immediately:
+
+```bash
+./build/p5-cli 192.168.1.241 set-ip 192.168.1.250
+```
+
+Set the IP and also update netmask and gateway:
+
+```bash
+./build/p5-cli 192.168.1.241 set-ip 192.168.1.250 255.255.255.0 192.168.1.1
 ```
 
 Set shutter speed from the camera display string:

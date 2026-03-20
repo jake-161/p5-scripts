@@ -21,9 +21,17 @@ struct Options {
     std::string command;
     std::string argument;
     std::string argument2;
+    std::string argument3;
     std::string password;
     bool help = false;
 };
+
+constexpr uint32_t kPropertyStaticSetup = 6023;
+constexpr uint32_t kPropertyIpAddress = 6024;
+constexpr uint32_t kPropertyNetmask = 6025;
+constexpr uint32_t kPropertyGateway = 6026;
+constexpr uint32_t kPropertyDhcpEnabled = 6027;
+constexpr uint32_t kPropertyNetworkStatusAction = 6029;
 
 std::string PropertyValueSummary(PropertyValue const& value)
 {
@@ -48,6 +56,17 @@ bool IsP5Camera(Camera const& camera)
     return model.rfind("P5", 0) == 0;
 }
 
+bool LooksLikeIpv4Value(std::string const& value)
+{
+    if (value.empty()) {
+        return false;
+    }
+
+    return std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return std::isdigit(c) != 0 || c == '.';
+    });
+}
+
 void PrintUsage(char const* argv0)
 {
     std::cerr
@@ -62,6 +81,7 @@ void PrintUsage(char const* argv0)
         << "  " << argv0 << " <camera-ip> download-image <image-id|filename> [output.iiq] [password]\n"
         << "  " << argv0 << " <camera-ip> property-info <property-id> [password]\n"
         << "  " << argv0 << " <camera-ip> set-property <property-id> <value> [password]\n"
+        << "  " << argv0 << " <camera-ip> set-ip <new-ip> [netmask] [gateway] [password]\n"
         << "  " << argv0 << " <camera-ip> set-iso <value> [password]\n"
         << "  " << argv0 << " <camera-ip> set-aperture <value> [password]\n"
         << "  " << argv0 << " <camera-ip> set-shutter-us <microseconds> [password]\n"
@@ -79,6 +99,7 @@ void PrintUsage(char const* argv0)
         << "  download-image        Download a stored image by image id or filename.\n"
         << "  property-info         Show one property's type, value, range, and allowed values.\n"
         << "  set-property          Set any writable property by numeric id.\n"
+        << "  set-ip                Set the camera IP and optionally update netmask and gateway.\n"
         << "  set-iso               Set property 120 (ISO) using an integer value.\n"
         << "  set-aperture          Set property 1003 (Aperture) using a floating point value.\n"
         << "  set-shutter-us        Set property 1012 (Shutter Speed [us]) using an integer value.\n"
@@ -101,6 +122,8 @@ void PrintUsage(char const* argv0)
         << "  " << argv0 << " 192.168.1.241 download-image 42 latest.iiq\n"
         << "  " << argv0 << " 192.168.1.241 property-info 120\n"
         << "  " << argv0 << " 192.168.1.241 set-property 1204 On\n"
+        << "  " << argv0 << " 192.168.1.241 set-ip 192.168.1.250\n"
+        << "  " << argv0 << " 192.168.1.241 set-ip 192.168.1.250 255.255.255.0 192.168.1.1\n"
         << "  " << argv0 << " 192.168.1.241 set-iso 400\n"
         << "  " << argv0 << " 192.168.1.241 set-shutter-us 1000\n"
         << "  " << argv0 << " 192.168.1.241 set-shutter 1/1000\n";
@@ -160,6 +183,7 @@ Options ParseArgs(int argc, char** argv)
 
     if (options.command == "property-info" ||
         options.command == "set-property" ||
+        options.command == "set-ip" ||
         options.command == "set-iso" ||
         options.command == "set-aperture" ||
         options.command == "set-shutter-us" ||
@@ -180,6 +204,26 @@ Options ParseArgs(int argc, char** argv)
             options.argument2 = argv[4];
             if (argc >= 6) {
                 options.password = argv[5];
+            }
+        } else if (options.command == "set-ip") {
+            if (argc >= 5) {
+                std::string fourth = argv[4];
+                if (LooksLikeIpv4Value(fourth)) {
+                    options.argument2 = fourth;
+                    if (argc >= 6) {
+                        std::string fifth = argv[5];
+                        if (LooksLikeIpv4Value(fifth)) {
+                            options.argument3 = fifth;
+                            if (argc >= 7) {
+                                options.password = argv[6];
+                            }
+                        } else {
+                            options.password = fifth;
+                        }
+                    }
+                } else {
+                    options.password = fourth;
+                }
             }
         } else if (argc >= 5) {
             options.password = argv[4];
@@ -436,26 +480,62 @@ std::shared_ptr<IStoredImageHandle> FindStoredImage(Camera& camera, std::string 
 PropertyValue ParsePropertyValue(PropertySpecification const& spec, std::string const& raw)
 {
     switch (spec.mValue.mType) {
-        case kPropertyTypeBool:
+        case kPropertyTypeBool: {
+            PropertyValue value = spec.mValue;
             if (raw == "1" || raw == "true" || raw == "True" || raw == "yes" || raw == "Yes" || raw == "On") {
-                return PropertyValue(static_cast<int32_t>(1));
+                value.mInt = 1;
+                value.mPresentationString = "Yes";
+                return value;
             }
             if (raw == "0" || raw == "false" || raw == "False" || raw == "no" || raw == "No" || raw == "Off") {
-                return PropertyValue(static_cast<int32_t>(0));
+                value.mInt = 0;
+                value.mPresentationString = "No";
+                return value;
             }
             throw std::runtime_error("invalid boolean value: " + raw);
-        case kPropertyTypeInt32:
-        case kPropertyTypeInt64:
-        case kPropertyTypeTime:
-            return PropertyValue(static_cast<int64_t>(std::stoll(raw)));
-        case kPropertyTypeUInt32:
-            return PropertyValue(static_cast<uint32_t>(std::stoul(raw)));
-        case kPropertyTypeUInt64:
-            return PropertyValue(static_cast<uint64_t>(std::stoull(raw)));
-        case kPropertyTypeFloat64:
-            return PropertyValue(std::stod(raw));
-        case kPropertyTypeString:
-            return PropertyValue(raw);
+        }
+        case kPropertyTypeInt32: {
+            PropertyValue value = spec.mValue;
+            value.mInt = static_cast<int32_t>(std::stol(raw));
+            value.mPresentationString.clear();
+            return value;
+        }
+        case kPropertyTypeInt64: {
+            PropertyValue value = spec.mValue;
+            value.mInt = static_cast<int64_t>(std::stoll(raw));
+            value.mPresentationString.clear();
+            return value;
+        }
+        case kPropertyTypeTime: {
+            PropertyValue value = spec.mValue;
+            value.mInt = static_cast<int64_t>(std::stoll(raw));
+            value.mPresentationString.clear();
+            return value;
+        }
+        case kPropertyTypeUInt32: {
+            PropertyValue value = spec.mValue;
+            value.mInt = static_cast<uint32_t>(std::stoul(raw));
+            value.mPresentationString.clear();
+            return value;
+        }
+        case kPropertyTypeUInt64: {
+            PropertyValue value = spec.mValue;
+            value.mInt = static_cast<uint64_t>(std::stoull(raw));
+            value.mPresentationString.clear();
+            return value;
+        }
+        case kPropertyTypeFloat64: {
+            PropertyValue value = spec.mValue;
+            value.mDouble = std::stod(raw);
+            value.mPresentationString.clear();
+            return value;
+        }
+        case kPropertyTypeString: {
+            PropertyValue value = spec.mValue;
+            value.mString = raw;
+            value.mPresentationString.clear();
+            return value;
+        }
         case kPropertyTypeEnum:
             for (auto const& candidate : spec.mValueList) {
                 if (candidate.StringValue() == raw || candidate.mPresentationString == raw) {
@@ -469,6 +549,14 @@ PropertyValue ParsePropertyValue(PropertySpecification const& spec, std::string 
         default:
             throw std::runtime_error("unsupported property type for CLI setter: " + spec.mValue.TypeString());
     }
+}
+
+PropertyValue ResolveEnumPropertyValue(PropertySpecification const& spec, std::string const& raw)
+{
+    if (spec.mValue.mType != kPropertyTypeEnum) {
+        throw std::runtime_error("property is not an enum: " + spec.mName);
+    }
+    return ParsePropertyValue(spec, raw);
 }
 
 void PrintSubscriptionSupport(ISubscriptionManager& subscriptions)
@@ -594,6 +682,56 @@ void SetPropertyById(Camera& camera, uint32_t propertyId, std::string const& raw
         << " | name=\"" << updated.mName << "\""
         << " | value=" << PropertyValueSummary(updated.mValue)
         << '\n';
+}
+
+void SetPropertyValue(Camera& camera, uint32_t propertyId, PropertyValue const& value)
+{
+    auto spec = camera.PropertySpec(propertyId);
+    if (spec.mReadOnly) {
+        throw std::runtime_error("property is read-only: " + spec.mName);
+    }
+    if (!spec.mEnabled) {
+        throw std::runtime_error("property is disabled: " + spec.mName);
+    }
+
+    camera.SetProperty(propertyId, value);
+
+    auto updated = camera.PropertySpec(propertyId);
+    std::cout
+        << "Updated property " << propertyId
+        << " | name=\"" << updated.mName << "\""
+        << " | value=" << PropertyValueSummary(updated.mValue)
+        << '\n';
+}
+
+void SetCameraIpAddress(
+    Camera& camera,
+    std::string const& newIp,
+    std::string const& newNetmask,
+    std::string const& newGateway)
+{
+    auto applyNowValue = ResolveEnumPropertyValue(camera.PropertySpec(kPropertyNetworkStatusAction), "Apply Now");
+
+    std::cout
+        << "Updating network settings"
+        << " | ip=" << newIp
+        << " | netmask=" << (newNetmask.empty() ? "<unchanged>" : newNetmask)
+        << " | gateway=" << (newGateway.empty() ? "<unchanged>" : newGateway)
+        << '\n';
+
+    SetPropertyById(camera, kPropertyStaticSetup, "Yes");
+    SetPropertyById(camera, kPropertyDhcpEnabled, "No");
+    SetPropertyById(camera, kPropertyIpAddress, newIp);
+
+    if (!newNetmask.empty()) {
+        SetPropertyById(camera, kPropertyNetmask, newNetmask);
+    }
+    if (!newGateway.empty()) {
+        SetPropertyById(camera, kPropertyGateway, newGateway);
+    }
+    SetPropertyValue(camera, kPropertyNetworkStatusAction, applyNowValue);
+
+    std::cout << "Network change requested. Reconnect using the new IP address if the session drops.\n";
 }
 
 void PrintStoredImages(Camera& camera)
@@ -803,6 +941,8 @@ int main(int argc, char** argv)
                 throw std::runtime_error("set-property requires a numeric property id");
             }
             SetPropertyById(camera, static_cast<uint32_t>(std::stoul(options.argument)), options.argument2);
+        } else if (options.command == "set-ip") {
+            SetCameraIpAddress(camera, options.argument, options.argument2, options.argument3);
         } else if (options.command == "set-iso") {
             SetPropertyById(camera, 120, options.argument);
         } else if (options.command == "set-aperture") {
