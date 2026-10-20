@@ -1,3 +1,18 @@
-.vscode
-build
-SDK
+# Local editor settings
+/.vscode/
+
+# Build and distribution artifacts
+/build/
+/build-*/
+/debug/
+/dist/
+/dist-*/
+/p5-cli-*.tar.gz
+
+# Vendor SDKs and reference material (not redistributed)
+/SDK/
+/P5 Camera Integration Guide*.pdf
+
+# Local camera data and captures
+/msgs/
+*.iiq

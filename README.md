@@ -40,7 +40,38 @@ Run the help output:
 ./build/p5-cli --help
 ```
 
-On Linux, the target sets an `RPATH` to the bundled SDK library directory so the executable can find the Camera SDK shared libraries from the repo checkout.
+The CLI links against the shared Camera SDK library.
+
+Use `-DCAMERA_SDK_ROOT=/absolute/path/to/sdk` for an SDK outside the default location.
+You can also override `CameraSDK_DIR` directly. Use a fresh build directory when switching SDK roots or target architectures,
+since CMake caches the package location. Cross-compilation additionally requires an appropriate CMake toolchain file and an SDK for the target architecture.
+
+On Linux, build executables use an `RPATH` pointing to the SDK library directory.
+Installed executables look for shared libraries in `lib` beside the executable:
+
+```bash
+cmake --install build --prefix "$PWD/dist"
+```
+
+Installation copies only `p5-cli`. Supply the matching SDK shared library and its SONAME symlinks
+in `dist/lib`, subject to the vendor's redistribution terms. Other runtime dependencies must be available on the target system.
+
+## Tests
+
+Run the camera-free CLI smoke tests after building:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+These check help and invalid arguments without opening a camera. Camera operations still require hardware testing.
+Disable test registration with `-DBUILD_TESTING=OFF` if needed.
+
+## Repository hygiene
+
+Keep vendor SDKs, reference PDFs, local camera data, build directories, and release archives out of Git.
+The root `.gitignore` covers the local `SDK`, `msgs`, `debug`, `build*`, and `dist*` directories used here,
+as well as IIQ captures. These files remain on disk.
 
 ## Usage
 
